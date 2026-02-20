@@ -12,6 +12,7 @@
 		"cert_path": "example.crt",
 		"key_path": "example.key"
 	},
+	"api_gateway_domain": "",
 	"db_name": "sqlite3",
 	"db_path": "gophish.db",
 	"migrations_prefix": "db/db_",
