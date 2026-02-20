@@ -665,6 +665,28 @@ func CompleteCampaign(id int64, uid int64) error {
 		Select([]string{"completed_date", "status"}).UpdateColumns(&c).Error
 	if err != nil {
 		log.Error(err)
+		return err
 	}
-	return err
+
+	// Send a webhook notification for the manual completion action.
+	// We intentionally *don't* create a Campaign timeline Event row here,
+	// since this action is an administrative state change rather than a recipient event.
+	completionEvent := &Event{Message: EventCampaignComplete}
+	completionEvent.CampaignId = id
+	completionEvent.Time = c.CompletedDate
+	whs, err := GetActiveWebhooks()
+	if err == nil {
+		whEndPoints := []webhook.EndPoint{}
+		for _, wh := range whs {
+			whEndPoints = append(whEndPoints, webhook.EndPoint{
+				URL:    wh.URL,
+				Secret: wh.Secret,
+			})
+		}
+		webhook.SendAll(whEndPoints, completionEvent)
+	} else {
+		log.Errorf("error getting active webhooks: %v", err)
+	}
+
+	return nil
 }
