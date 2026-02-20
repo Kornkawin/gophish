@@ -1,7 +1,11 @@
 package models
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -661,10 +665,77 @@ func CompleteCampaign(id int64, uid int64) error {
 	// Mark the campaign as complete
 	c.CompletedDate = time.Now().UTC()
 	c.Status = CampaignComplete
-	err = db.Model(&Campaign{}).Where("id=? and user_id=?", id, uid).
-		Select([]string{"completed_date", "status"}).UpdateColumns(&c).Error
-	if err != nil {
-		log.Error(err)
+	result := db.Model(&Campaign{}).Where("id=? and user_id=? and status <> ?", id, uid, CampaignComplete).
+		Select([]string{"completed_date", "status"}).UpdateColumns(&c)
+	if result.Error != nil {
+		log.Error(result.Error)
+		return result.Error
 	}
-	return err
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	go sendCampaignCompleteNotification(c.Id)
+	return nil
+}
+
+type campaignCompleteNotification struct {
+	CampaignID int64  `json:"campaign_id"`
+	Message    string `json:"message"`
+	Time       string `json:"time"`
+	Details    struct {
+		Stats struct {
+			Sent          int64 `json:"sent"`
+			Opened        int64 `json:"opened"`
+			Clicked       int64 `json:"clicked"`
+			SubmittedData int64 `json:"submitted_data"`
+			Reported      int64 `json:"reported"`
+			Total         int64 `json:"total"`
+		} `json:"stats"`
+	} `json:"details"`
+}
+
+func sendCampaignCompleteNotification(campaignID int64) {
+	if conf == nil || conf.APIGatewayDomain == "" {
+		return
+	}
+
+	stats, err := getCampaignStats(campaignID)
+	if err != nil {
+		log.WithFields(logrus.Fields{"campaign_id": campaignID}).Errorf("error fetching campaign stats for completion notification: %v", err)
+		return
+	}
+
+	p := campaignCompleteNotification{
+		CampaignID: campaignID,
+		Message:    "Campaign Completed",
+		Time:       time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	p.Details.Stats.Sent = stats.EmailsSent
+	p.Details.Stats.Opened = stats.OpenedEmail
+	p.Details.Stats.Clicked = stats.ClickedLink
+	p.Details.Stats.SubmittedData = stats.SubmittedData
+	p.Details.Stats.Reported = stats.EmailReported
+	p.Details.Stats.Total = stats.Total
+
+	body, err := json.Marshal(p)
+	if err != nil {
+		log.WithFields(logrus.Fields{"campaign_id": campaignID}).Errorf("error marshaling completion notification payload: %v", err)
+		return
+	}
+
+	endpoint := fmt.Sprintf("https://%s/complete", conf.APIGatewayDomain)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		log.WithFields(logrus.Fields{"campaign_id": campaignID}).Errorf("error building completion notification request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.WithFields(logrus.Fields{"campaign_id": campaignID}).Errorf("error sending completion notification: %v", err)
+		return
+	}
+	defer resp.Body.Close()
 }
